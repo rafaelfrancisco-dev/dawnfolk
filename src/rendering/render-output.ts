@@ -7,8 +7,10 @@ import {
   DepthTexture,
   HalfFloatType,
   type Node,
+  type PassNode,
   RenderPipeline,
-  type Scene,
+  Scene,
+  Vector2,
   type WebGPURenderer,
 } from "three/webgpu";
 import { ignore } from "../shared/ignore.ts";
@@ -52,6 +54,27 @@ function finish(color: Node<"vec4">, quality: RenderQuality): FinishedColor {
   return { color, dispose: ignore };
 }
 
+// three clears the depth of a target the first time a pass that keeps depth renders to it, and a resize replaces the
+// targets. Rendering nothing to each target, the depth owner first, spends that clear before the solid pass fills the
+// shared depth, so clouds and water don't draw over the island for a frame.
+function settleResizedTargets(
+  renderer: WebGPURenderer,
+  passes: readonly PassNode[],
+  camera: Camera,
+  size: Vector2,
+  emptyScene: Scene
+): void {
+  const previousTarget = renderer.getRenderTarget();
+
+  for (const scenePass of passes) {
+    scenePass.setSize(size.x, size.y);
+    renderer.setRenderTarget(scenePass.renderTarget);
+    renderer.render(emptyScene, camera);
+  }
+
+  renderer.setRenderTarget(previousTarget);
+}
+
 export function createRenderOutput(
   renderer: WebGPURenderer,
   scene: Scene,
@@ -79,6 +102,9 @@ export function createRenderOutput(
   const smoothed = fxaa(finished.color);
 
   const pipeline = new RenderPipeline(renderer, smoothed);
+  const emptyScene = new Scene();
+  const drawingBufferSize = new Vector2();
+  const settledSize = new Vector2();
 
   return {
     dispose: () => {
@@ -91,6 +117,13 @@ export function createRenderOutput(
     },
     render: () => {
       outlines.pixelRatio.value = renderer.getPixelRatio();
+      renderer.getDrawingBufferSize(drawingBufferSize);
+
+      if (!drawingBufferSize.equals(settledSize)) {
+        settleResizedTargets(renderer, [solidPass, seeThroughPass], camera, drawingBufferSize, emptyScene);
+        settledSize.copy(drawingBufferSize);
+      }
+
       pipeline.render();
     },
     setOutlinesShown: (areShown) => {
